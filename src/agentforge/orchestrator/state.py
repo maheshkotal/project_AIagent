@@ -47,6 +47,9 @@ class TaskResult(BaseModel):
 
 GateAction = Literal["approve", "reject", "retry", "abort"]
 
+# Owner recorded for files imported from an existing repository (brownfield).
+REPO_OWNER = "repo"
+
 
 class GateDecision(BaseModel):
     gate: str
@@ -69,11 +72,12 @@ class RunState(BaseModel):
     plan: TaskGraph | None = None
     plan_revisions: int = 0
     tasks: dict[str, TaskResult] = Field(default_factory=dict)
-    # Which task (or "repo" / "repair-N") last wrote each workspace file; used to detect write conflicts.
+    # Which task (or REPO_OWNER / "repair-N") last wrote each workspace file; used to detect write conflicts.
     file_owners: dict[str, str] = Field(default_factory=dict)
     validations: list[ValidationReport] = Field(default_factory=list)
     repairs: list[RepairRound] = Field(default_factory=list)
     decisions: list[GateDecision] = Field(default_factory=list)
+    metrics: dict[str, int] = Field(default_factory=dict)
     error: str | None = None
 
     def outputs_of(self, task_ids: list[str]) -> dict[str, dict[str, Any]]:

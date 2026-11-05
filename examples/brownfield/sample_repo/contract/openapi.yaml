@@ -1,0 +1,84 @@
+openapi: 3.1.0
+info:
+  title: URL Shortener
+  version: 1.0.0
+paths:
+  /api/v1/links:
+    post:
+      summary: Create a short link
+      operationId: createLink
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LinkCreate'
+      responses:
+        '201':
+          description: Short link created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkOut'
+        '422':
+          description: Invalid URL or alias
+  /api/v1/links/{code}:
+    get:
+      summary: Link details and click count
+      operationId: getLinkStats
+      parameters:
+        - $ref: '#/components/parameters/Code'
+      responses:
+        '200':
+          description: Link details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkOut'
+        '404':
+          description: Unknown code
+  /{code}:
+    get:
+      summary: Redirect to the original URL
+      operationId: redirect
+      parameters:
+        - $ref: '#/components/parameters/Code'
+      responses:
+        '307':
+          description: Redirect to the target URL
+        '404':
+          description: Unknown code
+components:
+  parameters:
+    Code:
+      name: code
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    LinkCreate:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          format: uri
+        custom_alias:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{3,32}$'
+    LinkOut:
+      type: object
+      required: [code, short_url, target_url, created_at, clicks]
+      properties:
+        code:
+          type: string
+        short_url:
+          type: string
+        target_url:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        clicks:
+          type: integer

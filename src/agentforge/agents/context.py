@@ -17,12 +17,11 @@ from agentforge.models import (
     ValidationReport,
 )
 from agentforge.orchestrator.dag import TaskContext
-from agentforge.orchestrator.state import RunState, TaskStatus
+from agentforge.orchestrator.state import REPO_OWNER, RunState, TaskStatus
 from agentforge.tools.checks import CONTRACT_PATH
 from agentforge.tools.sandbox import Sandbox
 
 MAX_FILE_CHARS = 24_000
-REPO_OWNER = "repo"
 
 
 class FileConflictError(Exception):

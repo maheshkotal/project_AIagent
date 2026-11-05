@@ -122,7 +122,11 @@ def main(argv: list[str] | None = None) -> int:
     console.print(
         f"\n[bold {color}]Run {final.status.value}[/bold {color}]" + (f": {final.error}" if final.error else "")
     )
+    run_dir = store.run_dir(final.run_id)
     console.print(f"Workspace: {pipeline.workspace.root}")
+    console.print(f"Summary:   {run_dir / 'SUMMARY.md'}")
+    if (run_dir / "changes.diff").exists():
+        console.print(f"Diff:      {run_dir / 'changes.diff'}")
     if final.status is not RunStatus.COMPLETED:
         console.print(f"Resume with: agentforge resume {final.run_id}")
     return 0 if final.status is RunStatus.COMPLETED else 1

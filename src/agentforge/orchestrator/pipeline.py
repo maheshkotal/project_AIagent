@@ -3,7 +3,8 @@
     analyze -> [gate: spec] -> impact (brownfield) -> plan -> [gate: plan] -> execute (DAG)
             -> validate (+ review/repair loop) -> [gate: output]
 
-Every phase is checkpointed; resuming a run skips phases that already completed.
+Every phase is checkpointed; resuming a run skips phases that already completed. Every run, whatever
+its outcome, ends with SUMMARY.md (and changes.diff for brownfield runs) in the run directory.
 """
 
 from __future__ import annotations
@@ -20,7 +21,9 @@ from agentforge.orchestrator.checkpoint import CheckpointStore
 from agentforge.orchestrator.dag import DagExecutor, TaskHandler
 from agentforge.orchestrator.gates import Gate, GateRequest
 from agentforge.orchestrator.render import output_markdown, plan_markdown, spec_markdown, tasks_markdown
-from agentforge.orchestrator.state import GateDecision, RunState, RunStatus, TaskStatus
+from agentforge.orchestrator.state import REPO_OWNER, GateDecision, RunState, RunStatus, TaskStatus
+from agentforge.orchestrator.summary import build_summary
+from agentforge.tools.repo import diff_stats, import_repo, unified_diff
 from agentforge.tools.sandbox import Sandbox
 
 
@@ -31,7 +34,7 @@ class RequirementAnalyst(Protocol):
 
 
 class ImpactAnalyst(Protocol):
-    async def analyze(self, spec: NormalizedSpec, repo_path: Path) -> ImpactReport: ...
+    async def analyze(self, spec: NormalizedSpec, workspace: Sandbox) -> ImpactReport: ...
 
 
 class Planner(Protocol):
@@ -96,6 +99,9 @@ class Pipeline:
         self.audit = audit
         self.settings = settings
         self.workspace = Sandbox(store.run_dir(state.run_id) / "workspace")
+        # Pristine copy of an imported repository, for diffing (brownfield only).
+        self.baseline = Sandbox(store.run_dir(state.run_id) / "baseline") if state.repo_path else None
+        audit.subscribe(self._collect_metrics)
         self._phases: dict[str, Callable[[], Awaitable[None]]] = {
             "analyze": self._analyze,
             "approve_spec": self._approve_spec,
@@ -154,13 +160,20 @@ class Pipeline:
         raise RunAborted(f"Requirement understanding rejected {self.settings.max_replans + 1} times")
 
     async def _impact(self) -> None:
-        if not self.state.repo_path:
+        state = self.state
+        if not state.repo_path:
             self.audit.record("phase_skipped", phase="impact", reason="greenfield run (no repository)")
             return
         if self.agents.impact_analyst is None:
             raise RuntimeError("Brownfield run requested but no impact analyst is configured")
-        assert self.state.spec is not None
-        self.state.impact = await self.agents.impact_analyst.analyze(self.state.spec, Path(self.state.repo_path))
+        assert state.spec is not None and self.baseline is not None
+        if REPO_OWNER not in state.file_owners.values():
+            # Agents work on a copy; the original repository is never modified.
+            imported = import_repo(Path(state.repo_path), self.workspace, self.baseline)
+            state.file_owners.update(dict.fromkeys(imported, REPO_OWNER))
+            self.audit.record("repo_imported", files=len(imported))
+            self._save()
+        state.impact = await self.agents.impact_analyst.analyze(state.spec, self.workspace)
 
     async def _plan(self) -> None:
         state = self.state
@@ -305,7 +318,34 @@ class Pipeline:
         self.state.status, self.state.error = status, error
         self.audit.record("run_finished", status=status.value, error=error)
         self._save()
+        try:
+            self._write_reports()
+        except Exception as exc:  # reporting must never mask the run outcome
+            self.audit.record("report_failed", error=f"{type(exc).__name__}: {exc}")
         return self.state
+
+    def _write_reports(self) -> None:
+        """SUMMARY.md for every run (including aborted/failed ones) and changes.diff for brownfield runs."""
+        run_dir = self.store.run_dir(self.state.run_id)
+        stats = None
+        if self.baseline is not None:
+            diff = unified_diff(self.baseline, self.workspace)
+            (run_dir / "changes.diff").write_text(diff, encoding="utf-8")
+            stats = diff_stats(diff)
+        summary = build_summary(self.state, self.workspace.list_files(), stats)
+        (run_dir / "SUMMARY.md").write_text(summary, encoding="utf-8")
+        self.audit.record("reports_written", summary=str(run_dir / "SUMMARY.md"))
+
+    def _collect_metrics(self, event: dict) -> None:
+        metrics = self.state.metrics
+        name = event["event"]
+        if name == "llm_call":
+            metrics["llm_calls"] = metrics.get("llm_calls", 0) + 1
+            metrics["input_tokens"] = metrics.get("input_tokens", 0) + event["input_tokens"]
+            metrics["output_tokens"] = metrics.get("output_tokens", 0) + event["output_tokens"]
+        elif name in ("llm_retry", "task_retry"):
+            key = f"{name.split('_')[0]}_retries"
+            metrics[key] = metrics.get(key, 0) + 1
 
     def _save(self) -> None:
         self.store.save(self.state)

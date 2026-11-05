@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from agentforge.audit import AuditLog
 from agentforge.config import Settings
@@ -72,10 +71,10 @@ class FakePlanner:
 
 @dataclass
 class FakeImpactAnalyst:
-    repo_paths: list[Path] = field(default_factory=list)
+    seen_files: list[list[str]] = field(default_factory=list)
 
-    async def analyze(self, spec, repo_path: Path) -> ImpactReport:
-        self.repo_paths.append(repo_path)
+    async def analyze(self, spec, workspace) -> ImpactReport:
+        self.seen_files.append(workspace.list_files())
         return ImpactReport(
             architecture_summary="FastAPI app",
             impacted_modules=[ImpactedItem(path="app/main.py", change_type=ChangeType.MODIFY, reason="add expiry")],
@@ -228,14 +227,32 @@ async def test_aborted_run_can_be_resumed_without_redoing_work(tmp_path) -> None
     assert [d.gate for d in state.decisions] == ["spec", "plan", "execution_failures", "output"]
 
 
-async def test_brownfield_runs_impact_analysis(tmp_path) -> None:
+async def test_brownfield_imports_repo_copy_and_runs_impact_analysis(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "main.py").write_text("x = 1\n")
+    (repo / ".env").write_text("SECRET=1\n")
     analyst = FakeImpactAnalyst()
-    state = RunState(requirement="Add expiry", repo_path=str(tmp_path / "repo"))
+    state = RunState(requirement="Add expiry", repo_path=str(repo))
     pipeline, _ = make_pipeline(tmp_path, state=state, impact_analyst=analyst)
     state = await pipeline.run()
+
     assert state.status is RunStatus.COMPLETED
     assert state.impact.impacted_modules[0].path == "app/main.py"
-    assert analyst.repo_paths == [tmp_path / "repo"]
+    assert analyst.seen_files == [["app/main.py"]]  # secrets are never imported
+    assert state.file_owners["app/main.py"] == "repo"
+    run_dir = tmp_path / "runs" / state.run_id
+    diff = (run_dir / "changes.diff").read_text()
+    assert "+++ b/design.txt" in diff and "app/main.py" not in diff
+    assert (repo / "app" / "main.py").read_text() == "x = 1\n"  # original untouched
+    assert "## 3. Impact analysis" in (run_dir / "SUMMARY.md").read_text()
+
+
+async def test_every_run_writes_a_summary_even_when_aborted(tmp_path) -> None:
+    pipeline, _ = make_pipeline(tmp_path, gate=ScriptedGate([GateDecision(gate="plan", action="abort")]))
+    state = await pipeline.run()
+    summary = (tmp_path / "runs" / state.run_id / "SUMMARY.md").read_text()
+    assert "**aborted**" in summary and "## 4. Implementation plan" in summary
 
 
 async def test_brownfield_without_impact_analyst_fails_cleanly(tmp_path) -> None:

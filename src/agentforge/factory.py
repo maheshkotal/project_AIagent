@@ -5,6 +5,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
+from agentforge.agents.impact import ImpactAnalystAgent
 from agentforge.agents.planning import PlannerAgent, RequirementAnalystAgent, plan_rules
 from agentforge.agents.review import RepairCoordinator, ReviewerAgent
 from agentforge.agents.workers import ArchitectAgent, CoderAgent, DocsAgent, RiskAgent, TaskRouter, TesterAgent
@@ -56,6 +57,7 @@ def build_agents(llm: LLMClient, settings: Settings, audit: AuditLog) -> AgentSu
         planner=PlannerAgent(llm, settings),
         task_handler=router,
         worker_agents=router.agent_names,
+        impact_analyst=ImpactAnalystAgent(llm, settings),
         plan_rules=plan_rules,
         validator=WorkspaceValidator(),
         repairer=RepairCoordinator(ReviewerAgent(llm, settings), coder, tester, audit),
