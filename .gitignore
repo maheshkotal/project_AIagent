@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets
+.env
+
+# Run artifacts (example runs are committed under examples/ instead)
+runs/
+
+# OS / editor
+.DS_Store
