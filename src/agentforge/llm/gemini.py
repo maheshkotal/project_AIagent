@@ -16,7 +16,7 @@ RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 class GeminiClient(LLMClient):
     def __init__(self, *, api_key: str, model: str, client: genai.Client | None = None) -> None:
         if not api_key and client is None:
-            raise LLMError("GEMINI_API_KEY is not set. Add it to .env or use --replay with recorded responses.")
+            raise LLMError("GEMINI_API_KEY is not set. Add it to .env, or use `--llm replay` with recorded cassettes.")
         self._model = model
         self._client = client or genai.Client(api_key=api_key)
 

@@ -26,6 +26,17 @@ class TaskGraph(BaseModel):
                 return task
         raise KeyError(task_id)
 
+    def ancestors(self, task_id: str) -> set[str]:
+        """All tasks `task_id` transitively depends on."""
+        seen: set[str] = set()
+        stack = list(self.task(task_id).depends_on)
+        while stack:
+            current = stack.pop()
+            if current not in seen:
+                seen.add(current)
+                stack.extend(self.task(current).depends_on)
+        return seen
+
     def validation_errors(self, allowed_agents: Collection[str] | None = None) -> list[str]:
         """Deterministic structural checks; an LLM-produced plan is never trusted blindly."""
         errors: list[str] = []

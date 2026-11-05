@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from agentforge.models import ImpactReport, NormalizedSpec, TaskGraph
+from agentforge.models import ImpactReport, NormalizedSpec, RepairRound, TaskGraph, ValidationReport
 
 
 def utcnow() -> datetime:
@@ -69,8 +69,16 @@ class RunState(BaseModel):
     plan: TaskGraph | None = None
     plan_revisions: int = 0
     tasks: dict[str, TaskResult] = Field(default_factory=dict)
+    # Which task (or "repo" / "repair-N") last wrote each workspace file; used to detect write conflicts.
+    file_owners: dict[str, str] = Field(default_factory=dict)
+    validations: list[ValidationReport] = Field(default_factory=list)
+    repairs: list[RepairRound] = Field(default_factory=list)
     decisions: list[GateDecision] = Field(default_factory=list)
     error: str | None = None
 
     def outputs_of(self, task_ids: list[str]) -> dict[str, dict[str, Any]]:
         return {tid: self.tasks[tid].output for tid in task_ids if tid in self.tasks}
+
+    @property
+    def latest_validation(self) -> ValidationReport | None:
+        return self.validations[-1] if self.validations else None

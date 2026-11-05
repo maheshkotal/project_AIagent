@@ -55,7 +55,7 @@ BAD_PLAN = TaskGraph(
 class FakeAnalyst:
     calls: list[str | None] = field(default_factory=list)
 
-    async def analyze(self, requirement: str, *, feedback: str | None = None) -> NormalizedSpec:
+    async def analyze(self, requirement: str, *, feedback: str | None = None, previous=None) -> NormalizedSpec:
         self.calls.append(feedback)
         return SPEC
 

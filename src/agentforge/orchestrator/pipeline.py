@@ -1,7 +1,7 @@
 """Phase pipeline: the static outer loop of a run, with human gates between autonomous phases.
 
     analyze -> [gate: spec] -> impact (brownfield) -> plan -> [gate: plan] -> execute (DAG)
-            -> [gate: output]
+            -> validate (+ review/repair loop) -> [gate: output]
 
 Every phase is checkpointed; resuming a run skips phases that already completed.
 """
@@ -15,17 +15,19 @@ from typing import Protocol
 
 from agentforge.audit import AuditLog
 from agentforge.config import Settings
-from agentforge.models import ImpactReport, NormalizedSpec, TaskGraph
+from agentforge.models import ImpactReport, NormalizedSpec, RepairRound, TaskGraph, ValidationReport
 from agentforge.orchestrator.checkpoint import CheckpointStore
 from agentforge.orchestrator.dag import DagExecutor, TaskHandler
 from agentforge.orchestrator.gates import Gate, GateRequest
-from agentforge.orchestrator.render import plan_markdown, spec_markdown, tasks_markdown
+from agentforge.orchestrator.render import output_markdown, plan_markdown, spec_markdown, tasks_markdown
 from agentforge.orchestrator.state import GateDecision, RunState, RunStatus, TaskStatus
 from agentforge.tools.sandbox import Sandbox
 
 
 class RequirementAnalyst(Protocol):
-    async def analyze(self, requirement: str, *, feedback: str | None = None) -> NormalizedSpec: ...
+    async def analyze(
+        self, requirement: str, *, feedback: str | None = None, previous: NormalizedSpec | None = None
+    ) -> NormalizedSpec: ...
 
 
 class ImpactAnalyst(Protocol):
@@ -43,6 +45,19 @@ class Planner(Protocol):
     ) -> TaskGraph: ...
 
 
+class Validator(Protocol):
+    async def validate(self, state: RunState, workspace: Sandbox, round: int) -> ValidationReport: ...
+
+
+class Repairer(Protocol):
+    async def repair(
+        self, state: RunState, workspace: Sandbox, report: ValidationReport, feedback: str | None = None
+    ) -> RepairRound: ...
+
+
+PlanRules = Callable[[TaskGraph, NormalizedSpec], list[str]]
+
+
 @dataclass(frozen=True)
 class AgentSuite:
     analyst: RequirementAnalyst
@@ -51,6 +66,10 @@ class AgentSuite:
     # Agent names the task handler can execute; plans referencing anything else are rejected.
     worker_agents: Collection[str]
     impact_analyst: ImpactAnalyst | None = None
+    # Domain-specific plan checks on top of structural DAG validation.
+    plan_rules: PlanRules | None = None
+    validator: Validator | None = None
+    repairer: Repairer | None = None
 
 
 class RunAborted(Exception):
@@ -58,7 +77,7 @@ class RunAborted(Exception):
 
 
 class Pipeline:
-    PHASES = ("analyze", "approve_spec", "impact", "plan", "execute", "approve_output")
+    PHASES = ("analyze", "approve_spec", "impact", "plan", "execute", "validate", "approve_output")
 
     def __init__(
         self,
@@ -83,6 +102,7 @@ class Pipeline:
             "impact": self._impact,
             "plan": self._plan,
             "execute": self._execute,
+            "validate": self._validate,
             "approve_output": self._approve_output,
         }
 
@@ -127,7 +147,9 @@ class Pipeline:
                 return
             if revision < self.settings.max_replans:
                 self.state.spec = await self.agents.analyst.analyze(
-                    self.state.requirement, feedback=decision.feedback or "Re-examine the requirement."
+                    self.state.requirement,
+                    feedback=decision.feedback or "Re-examine the requirement.",
+                    previous=spec,
                 )
         raise RunAborted(f"Requirement understanding rejected {self.settings.max_replans + 1} times")
 
@@ -149,6 +171,8 @@ class Pipeline:
             state.plan = plan
             self._save()
             errors = plan.validation_errors(self.agents.worker_agents)
+            if not errors and self.agents.plan_rules is not None:
+                errors = self.agents.plan_rules(plan, state.spec)
             if errors:
                 self.audit.record("plan_invalid", errors=errors)
                 feedback = "The previous plan failed automatic validation:\n" + "\n".join(f"- {e}" for e in errors)
@@ -199,17 +223,65 @@ class Pipeline:
                 return
             human_retries += 1
 
+    async def _validate(self) -> None:
+        """Validate the workspace; on failure run review/repair rounds until it passes or the budget runs out."""
+        if self.agents.validator is None:
+            self.audit.record("phase_skipped", phase="validate", reason="no validator configured")
+            return
+        report = await self._run_validation()
+        rounds = 0
+        while not report.passed and self.agents.repairer is not None and rounds < self.settings.max_repair_rounds:
+            rounds += 1
+            await self._run_repair(report, feedback=None)
+            report = await self._run_validation()
+        if not report.passed:
+            # Not an error: the output gate shows the failures and the human decides.
+            self.audit.record("validation_unresolved", failed=[c.name for c in report.failed_checks()])
+
     async def _approve_output(self) -> None:
-        await self._decide(
-            GateRequest(
-                gate="output",
-                title="Review generated output",
-                summary=tasks_markdown(self.state)
-                + "\n\n**Workspace files**\n"
-                + "\n".join(f"- `{f}`" for f in self.workspace.list_files()),
-                actions=["approve", "abort"],
+        for _ in range(self.settings.max_replans + 1):
+            report = self.state.latest_validation
+            passed = report is None or report.passed
+            decision = await self._decide(
+                GateRequest(
+                    gate="output",
+                    title="Review generated output" if passed else "Review generated output (VALIDATION FAILED)",
+                    summary=output_markdown(self.state, self.workspace.list_files())
+                    + "\n\n*approve*: accept the output · *reject*: send your feedback to the reviewer for another"
+                    " repair round · *abort*: stop the run",
+                    # Fail safe: when validation failed, the default (and auto) action is abort.
+                    actions=["approve", "reject", "abort"] if passed else ["abort", "reject", "approve"],
+                )
             )
+            if decision.action == "approve":
+                if not passed:
+                    self.audit.record("failed_validation_accepted")
+                return
+            if self.agents.validator is None or self.agents.repairer is None or report is None:
+                raise RunAborted("Output rejected and no repair loop is configured")
+            await self._run_repair(report, feedback=decision.feedback or "The reviewer rejected the output.")
+            await self._run_validation()
+        raise RunAborted(f"Output rejected {self.settings.max_replans + 1} times")
+
+    async def _run_validation(self) -> ValidationReport:
+        assert self.agents.validator is not None
+        report = await self.agents.validator.validate(self.state, self.workspace, len(self.state.validations) + 1)
+        self.state.validations.append(report)
+        self.audit.record(
+            "validation",
+            round=report.round,
+            passed=report.passed,
+            checks={c.name: c.status.value for c in report.checks},
+            tests=report.tests.model_dump(exclude={"failures", "output_tail"}) if report.tests else None,
         )
+        self._save()
+        return report
+
+    async def _run_repair(self, report: ValidationReport, feedback: str | None) -> None:
+        assert self.agents.repairer is not None
+        repair = await self.agents.repairer.repair(self.state, self.workspace, report, feedback)
+        self.state.repairs.append(repair)
+        self._save()
 
     # ---- helpers ------------------------------------------------------------------------------
 

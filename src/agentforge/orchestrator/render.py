@@ -59,3 +59,36 @@ def tasks_markdown(state: RunState) -> str:
         note = (result.error or "").replace("\n", " ")[:120]
         rows.append(f"| {result.task_id} | {result.status.value} | {result.attempts} | {note} |")
     return "\n".join(rows)
+
+
+def validation_markdown(state: RunState) -> str:
+    report = state.latest_validation
+    if report is None:
+        return "*No validation was run.*"
+    rows = ["| Check | Status | Summary |", "|---|---|---|"]
+    rows += [f"| {c.name} | {c.status.value} | {c.summary} |" for c in report.checks]
+    verdict = "PASSED" if report.passed else "FAILED"
+    lines = [f"**Validation round {report.round}: {verdict}**", "\n".join(rows)]
+    for check in report.failed_checks():
+        lines.append(f"**{check.name}**\n" + _bullets([d.replace("\n", " ")[:200] for d in check.details[:10]]))
+    if state.repairs:
+        lines.append(
+            "**Repair rounds**\n"
+            + _bullets(
+                [
+                    f"Round {r.round}: fault={r.verdict.fault}; changed {', '.join(r.files_changed) or 'nothing'}"
+                    for r in state.repairs
+                ]
+            )
+        )
+    return "\n\n".join(lines)
+
+
+def output_markdown(state: RunState, files: list[str]) -> str:
+    return "\n\n".join(
+        [
+            tasks_markdown(state),
+            validation_markdown(state),
+            "**Workspace files**\n" + "\n".join(f"- `{f}`" for f in files),
+        ]
+    )
