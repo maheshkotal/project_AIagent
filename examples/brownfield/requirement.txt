@@ -1,0 +1,1 @@
+Add optional link expiration to the URL shortener: clients may set an expiry when creating a link, and expired links must return 410 Gone instead of redirecting. Also fix the bug where creating a link with a custom alias that is already taken returns 500 instead of 409 Conflict.

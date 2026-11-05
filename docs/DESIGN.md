@@ -1,5 +1,11 @@
 # agentforge — Design
 
+> This is the design as originally approved before implementation. The as-built architecture,
+> including additions made during implementation (file-ownership guardrails, contract conformance
+> probe, dependency allow-list, metrics), is in [ARCHITECTURE.md](ARCHITECTURE.md). Code lives under
+> `src/agentforge/` rather than `agentforge/`, and the ambiguous example was changed to a greenfield
+> requirement (see `examples/ambiguous/`).
+
 An agentic software-engineering system that turns a software requirement into a
 reviewable engineering outcome: normalized spec → task graph → design, code,
 API contract, tests, docs → validation → structured engineering summary — with

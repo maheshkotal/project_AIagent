@@ -4,7 +4,7 @@ A small FastAPI + SQLAlchemy URL shortener. Used as the **brownfield sample** fo
 
 ```bash
 uvicorn app.main:create_app --factory   # run
-pytest                                  # test
+python -m pytest                        # test
 ```
 
 ## API
