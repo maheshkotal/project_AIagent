@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
@@ -21,6 +22,25 @@ ALLOWED_THIRD_PARTY = frozenset({"fastapi", "starlette", "pydantic", "sqlalchemy
 # flake8's "serious" set: syntax errors, invalid comparisons/statements, undefined names.
 SERIOUS_LINT_PREFIXES = ("E9", "F63", "F7", "F82")
 MAX_DETAIL = 1500
+
+_TMP_PATH = re.compile(r"/(?:private/)?(?:var/folders|tmp)/[^\s:'\"()]+")
+_DURATION = re.compile(r"\b\d+\.\d+s\b")
+_ADDRESS = re.compile(r"\b0x[0-9a-fA-F]{6,}\b")
+
+
+def scrub(text: str, ws: Sandbox) -> str:
+    """Remove run-specific noise (absolute paths, temp dirs, timings, addresses) from tool output.
+
+    Keeps prompts built from validation output deterministic, so recorded runs replay, and keeps
+    machine paths out of LLM prompts.
+    """
+    root = str(ws.root)
+    # Longest first: macOS reports temp paths both with and without the /private prefix.
+    for variant in (root, root.removeprefix("/private")):
+        text = text.replace(variant, "<workspace>")
+    text = _TMP_PATH.sub("<tmp>", text)
+    text = _DURATION.sub("<t>s", text)
+    return _ADDRESS.sub("0x...", text)
 
 
 def _python_files(ws: Sandbox) -> list[str]:
@@ -119,7 +139,7 @@ async def check_contract_conformance(ws: Sandbox) -> CheckResult:
             name=name,
             status=CheckStatus.FAILED,
             summary="Could not build the app via app.main.create_app()",
-            details=[result.stderr[-MAX_DETAIL:]],
+            details=[scrub(result.stderr[-MAX_DETAIL:], ws)],
         )
     designed = operations(yaml.safe_load(ws.read_text(CONTRACT_PATH)))
     actual = operations(json.loads(result.stdout))
@@ -152,14 +172,14 @@ async def run_tests(ws: Sandbox, timeout_s: float = 180) -> tuple[CheckResult, T
             cwd=ws.root,
             timeout_s=timeout_s,
         )
-        tail = (result.stdout + result.stderr)[-3000:]
+        tail = scrub((result.stdout + result.stderr)[-3000:], ws)
         if result.timed_out:
             return CheckResult(name=name, status=CheckStatus.FAILED, summary=result.stderr), TestRun(output_tail=tail)
         if not junit.exists():
             return CheckResult(name=name, status=CheckStatus.FAILED, summary="pytest crashed", details=[tail]), TestRun(
                 output_tail=tail
             )
-        run = _parse_junit(junit, tail)
+        run = _parse_junit(junit, tail, ws)
     if result.returncode == 5 or run.total == 0:
         return CheckResult(name=name, status=CheckStatus.FAILED, summary="No tests collected", details=[tail]), run
     summary = f"{run.passed} passed, {run.failed} failed, {run.errors} errors, {run.skipped} skipped"
@@ -169,7 +189,7 @@ async def run_tests(ws: Sandbox, timeout_s: float = 180) -> tuple[CheckResult, T
     return CheckResult(name=name, status=CheckStatus.PASSED, summary=summary), run
 
 
-def _parse_junit(path: Path, tail: str) -> TestRun:
+def _parse_junit(path: Path, tail: str, ws: Sandbox) -> TestRun:
     run = TestRun(output_tail=tail)
     for case in ET.parse(path).getroot().iter("testcase"):
         test_id = f"{case.get('classname', '')}::{case.get('name', '')}"
@@ -184,5 +204,5 @@ def _parse_junit(path: Path, tail: str) -> TestRun:
             else:
                 run.errors += 1
             message = (outcome.get("message") or "") + "\n" + (outcome.text or "")
-            run.failures.append(TestFailure(test_id=test_id, message=message.strip()[-MAX_DETAIL:]))
+            run.failures.append(TestFailure(test_id=test_id, message=scrub(message.strip()[-MAX_DETAIL:], ws)))
     return run

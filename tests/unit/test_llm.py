@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -267,3 +268,49 @@ async def test_gemini_empty_response_is_transient() -> None:
 def test_gemini_requires_api_key() -> None:
     with pytest.raises(LLMError, match="GEMINI_API_KEY"):
         GeminiClient(api_key="", model="m")
+
+
+def gemini_by_model(behaviours: dict, **kwargs) -> tuple[GeminiClient, list[str]]:
+    """SDK stub whose behaviour depends on the requested model ('hang' sleeps past the timeout)."""
+    tried: list[str] = []
+
+    async def generate_content(**call):
+        tried.append(call["model"])
+        behaviour = behaviours[call["model"]]
+        if behaviour == "hang":
+            await asyncio.sleep(10)
+        if isinstance(behaviour, Exception):
+            raise behaviour
+        return behaviour
+
+    sdk = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    return GeminiClient(api_key="", client=sdk, **kwargs), tried
+
+
+OVERLOADED = errors.APIError(503, {"error": {"message": "high demand"}})
+
+
+async def test_gemini_falls_back_to_next_model_on_overload_or_stall() -> None:
+    client, tried = gemini_by_model(
+        {"primary": OVERLOADED, "stalled": "hang", "backup": sdk_response("ok")},
+        model="primary",
+        fallback_models=["stalled", "backup"],
+        timeout_s=0.05,
+    )
+    response = await client.complete(request())
+    assert tried == ["primary", "stalled", "backup"]
+    assert response.model == "backup"
+
+
+async def test_gemini_raises_transient_when_every_model_fails() -> None:
+    client, _ = gemini_by_model({"a": OVERLOADED, "b": "hang"}, model="a", fallback_models=["b"], timeout_s=0.05)
+    with pytest.raises(TransientLLMError, match=r"a: .*503.* \| b: timed out"):
+        await client.complete(request())
+
+
+async def test_gemini_does_not_fall_back_on_permanent_errors() -> None:
+    bad_request = errors.APIError(400, {"error": {"message": "bad schema"}})
+    client, tried = gemini_by_model({"a": bad_request, "b": sdk_response("ok")}, model="a", fallback_models=["b"])
+    with pytest.raises(LLMError):
+        await client.complete(request())
+    assert tried == ["a"]

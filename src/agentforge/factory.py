@@ -30,7 +30,12 @@ class LLMMode(StrEnum):
 def build_llm(settings: Settings, mode: LLMMode, cassettes: Path, audit: AuditLog) -> LLMClient:
     live: LLMClient | None = None
     if mode is not LLMMode.REPLAY:
-        gemini = GeminiClient(api_key=settings.gemini_api_key or "", model=settings.model)
+        gemini = GeminiClient(
+            api_key=settings.gemini_api_key or "",
+            model=settings.model,
+            fallback_models=settings.fallback_models,
+            timeout_s=settings.llm_timeout_s,
+        )
         live = ResilientClient(
             gemini,
             limiter=RateLimiter(settings.requests_per_minute, settings.max_concurrency),

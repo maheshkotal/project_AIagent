@@ -8,7 +8,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-DEFAULT_MODEL = "gemini-3.8-flash"
+DEFAULT_MODEL = "gemini-3.5-flash"
+DEFAULT_FALLBACK_MODELS = ("gemini-3-flash-preview", "gemini-3.8-flash")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -27,6 +28,10 @@ class Settings:
 
     gemini_api_key: str | None = None
     model: str = DEFAULT_MODEL
+    # Tried in order when the primary model is overloaded or stalls (free-tier capacity varies by model).
+    fallback_models: tuple[str, ...] = DEFAULT_FALLBACK_MODELS
+    # Per-call timeout; a stalled call becomes a retryable error instead of hanging the run.
+    llm_timeout_s: float = 180.0
     # Rate limiting: stay under the provider's requests-per-minute and cap in-flight calls.
     requests_per_minute: int = 10
     max_concurrency: int = 3
@@ -53,6 +58,12 @@ class Settings:
         return cls(
             gemini_api_key=os.getenv("GEMINI_API_KEY") or None,
             model=os.getenv("AGENTFORGE_MODEL", DEFAULT_MODEL),
+            fallback_models=tuple(
+                m.strip()
+                for m in os.getenv("AGENTFORGE_FALLBACK_MODELS", ",".join(DEFAULT_FALLBACK_MODELS)).split(",")
+                if m.strip()
+            ),
+            llm_timeout_s=float(_env_int("AGENTFORGE_LLM_TIMEOUT_S", int(cls.llm_timeout_s))),
             requests_per_minute=_env_int("AGENTFORGE_RPM", cls.requests_per_minute),
             max_concurrency=_env_int("AGENTFORGE_MAX_CONCURRENCY", cls.max_concurrency),
             max_llm_calls_per_run=_env_int("AGENTFORGE_MAX_LLM_CALLS", cls.max_llm_calls_per_run),
